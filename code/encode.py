@@ -8,79 +8,6 @@ from sklearn.preprocessing import OneHotEncoder
 
 import constants
 import utils
-##########################################
-# Additional imports at the top of encode.py
-##########################################
-import torch
-from transformers import AutoTokenizer, AutoModel
-
-##########################################
-# New function for PLM-based encoding
-##########################################
-def enc_plm_embeddings(char_seqs, model_name="Rostlab/prot_bert_bfd", device="cpu"):
-    """
-    Encodes protein sequences into embeddings using a pretrained protein language model.
-
-    Parameters
-    ----------
-    char_seqs : list of str
-        List of protein sequences (single-letter codes), e.g. ["MKT...", "ACDE..."].
-    model_name : str
-        Name of the pretrained model to load from Hugging Face.
-    device : str
-        Device to run the model on, e.g. "cpu" or "cuda".
-
-    Returns
-    -------
-    embeddings : np.ndarray
-        A 3D NumPy array of shape (num_sequences, max_seq_len, hidden_dim),
-        containing the token-wise embeddings for each input sequence.
-    """
-
-    # 1) Load tokenizer and model
-    tokenizer = AutoTokenizer.from_pretrained(model_name, do_lower_case=False)
-    model = AutoModel.from_pretrained(model_name)
-    model.to(device)
-    model.eval()
-
-    # We’ll collect embeddings in a list, then stack them
-    all_embeddings = []
-
-    with torch.no_grad():
-        for seq in char_seqs:
-            # 2) Prepend special tokens as required by the model
-            # ProtBert typically expects a sequence like: [CLS] A C D ... [SEP]
-            # but the tokenizer handles that automatically if you pass just seq.
-
-            # The model might expect spaces between each amino acid (depending on model).
-            # For ProtBert, you often do: " ".join(list(seq)) if your seq is "ACDE..."
-            spaced_seq = " ".join(list(seq))
-
-            encoded_input = tokenizer(
-                spaced_seq,
-                return_tensors='pt',
-                add_special_tokens=True
-            ).to(device)
-
-            # 3) Forward pass to get hidden states
-            outputs = model(**encoded_input)
-            # Typically, outputs.last_hidden_state has shape [batch_size, seq_len, hidden_dim]
-            hidden_states = outputs.last_hidden_state
-
-            # Remove batch dimension (batch_size=1 here)
-            hidden_states = hidden_states.squeeze(0)  # shape: (seq_len, hidden_dim)
-
-            # 4) Convert to NumPy
-            emb_np = hidden_states.cpu().numpy()  # shape (seq_len, hidden_dim)
-            all_embeddings.append(emb_np)
-
-    # Now, we have a list of arrays with potentially different lengths (since sequences may differ).
-    # If your sequences are the same length, you can stack them directly.
-    # Otherwise, you might want to pad them to a uniform length or store them in a list.
-
-    # For demonstration, let’s assume all sequences are the same length:
-    embeddings = np.stack(all_embeddings, axis=0)  # shape (num_seqs, seq_len, hidden_dim)
-    return embeddings
 
 
 def enc_aa_index(int_seqs):
@@ -153,83 +80,41 @@ def encode_int_seqs(char_seqs=None, variants=None, wild_type_aa=None, wild_type_
 
 
 def encode(encoding, char_seqs=None, variants=None, ds_name=None, wt_aa=None, wt_offset=None):
-    """
-    the main encoding function that will encode the given sequences or variants and return the encoded data
-    Now extended to include 'plm' embeddings using pretrained language models.
-    """
+    """ the main encoding function that will encode the given sequences or variants and return the encoded data """
 
     if variants is None and char_seqs is None:
         raise ValueError("must provide either variants or full sequences to encode")
-
     if variants is not None and ((ds_name is None) and ((wt_aa is None) or (wt_offset is None))):
-        raise ValueError("if providing variants, must also provide (wt_aa and wt_offset) or ds_name so I can look up the WT sequence myself")
+        raise ValueError("if providing variants, must also provide (wt_aa and wt_offset) or "
+                         "ds_name so I can look up the WT sequence myself")
 
-    # If the user wants plm encoding, we want raw character sequences (like 'ACDE...'),
-    # so let's create them from variants or use char_seqs directly.
-    if "plm" in encoding:
-        # We'll gather the actual char sequences:
-        if char_seqs is None:
-            # Convert from variants to full char seq
-            # e.g. build them from the wild_type_aa with the specified variant changes
-            # Because enc_int_seqs_from_variants already returns an integer matrix,
-            # we can map that back to characters, or we can replicate the logic to directly get char_seqs.
-            # For simplicity, let's just replicate the logic to produce char strings.
-            char_seqs_list = []
-            int_seqs, _ = encode_int_seqs(variants=variants, wild_type_aa=wt_aa, wt_offset=wt_offset)
-            
-            # Build reverse mapping from integer -> char
-            rev_map = {v: k for k, v in constants.C2I_MAPPING.items()}
+    if ds_name is not None:
+        wt_aa = constants.DATASETS[ds_name]["wt_aa"]
+        wt_offset = constants.DATASETS[ds_name]["wt_ofs"]
 
-            for row in int_seqs:
-                seq_str = "".join(rev_map[int_val] for int_val in row)
-                char_seqs_list.append(seq_str)
+    # convert given variants or char sequences to integer sequences
+    # this may be a bit slower, but easier to program
+    int_seqs, single = encode_int_seqs(char_seqs=char_seqs, variants=variants,
+                                       wild_type_aa=wt_aa, wild_type_offset=wt_offset)
 
-        else:
-            if isinstance(char_seqs, str):
-                char_seqs_list = [char_seqs]
-            else:
-                char_seqs_list = char_seqs
-
-        # Now call the PLM embedding function
-        plm_embs = enc_plm_embeddings(char_seqs_list, model_name="Rostlab/prot_bert_bfd", device="cpu")
-        return plm_embs  # shape: (num_seqs, seq_len, hidden_dim)
-
-    # Otherwise, proceed with the existing logic
-    int_seqs, single = encode_int_seqs(
-        char_seqs=char_seqs,
-        variants=variants,
-        wild_type_aa=wt_aa,
-        wild_type_offset=wt_offset
-    )
-
-    encodings_list = encoding.split(",")
+    # encode variants using int seqs
+    encodings = encoding.split(",")
     encoded_data = []
-
-    for enc in encodings_list:
+    for enc in encodings:
         if enc == "one_hot":
             encoded_data.append(enc_one_hot(int_seqs))
         elif enc == "aa_index":
             encoded_data.append(enc_aa_index(int_seqs))
-        elif enc == "plm":
-            # If we get here, it means the user had "plm" among multiple encodings, e.g. "one_hot,plm"
-            # There's some ambiguity how you want to combine them, since PLM is typically raw chars
-            # For demonstration, let's skip or raise an error:
-            raise ValueError("Combining 'plm' with other encodings is not implemented.")
-                # Handling Combined Encodings
-                # If you want to combine "one_hot" + "plm" in a single run (i.e., encoding="one_hot,plm"), you have to decide how to combine them. For example:
-                # Produce the PLM embedding shape (N, L, D_plm)
-                # Produce the one-hot shape (N, L, 21)
-                # Possibly broadcast or pad the dimension to (N, L, D_plm + 21)
         else:
-            raise ValueError(f"err: encountered unknown encoding: {enc}")
+            raise ValueError("err: encountered unknown encoding: {}".format(enc))
 
-    # Concatenate if more than one encoding (excluding plm-only scenario)
+    # concatenate if we had more than one encoding
     if len(encoded_data) > 1:
         encoded_data = np.concatenate(encoded_data, axis=-1)
     else:
         encoded_data = encoded_data[0]
 
-    # If single sequence, remove the extra dimension
+    # if we were passed in a single sequence, remove the extra dimension
     if single:
         encoded_data = encoded_data[0]
 
