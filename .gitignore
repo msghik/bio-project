@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.egg-info/
+pip-wheel-metadata/
+.ipynb_checkpoints
+.cache
+.pytest_cache/
+
+# Output training logs
+output/training_logs/
+!output/training_logs/README.md
